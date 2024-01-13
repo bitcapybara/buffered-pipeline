@@ -1,0 +1,12 @@
+[package]
+name = "buffered-pipeline"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3"
+pin-project-lite = "0.2.13"
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7.10"
