@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, task::Poll};
+use std::{num::NonZeroUsize, task::Poll, time::Instant};
 
 use futures::{stream::FuturesUnordered, Future, FutureExt, Stream, StreamExt};
 use pin_project_lite::pin_project;
@@ -13,21 +13,12 @@ async fn main() {
             println!("{res:?}")
         }
     });
+    let start = Instant::now();
     BufferedPipeline::new(
         futures::stream::iter([
             async {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                1
-            }
-            .boxed(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                2
-            }
-            .boxed(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                3
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                5
             }
             .boxed(),
             async {
@@ -36,16 +27,27 @@ async fn main() {
             }
             .boxed(),
             async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                5
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                3
+            }
+            .boxed(),
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                2
+            }
+            .boxed(),
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                1
             }
             .boxed(),
         ])
         .fuse(),
         PollSender::new(sender),
-        NonZeroUsize::new(10).unwrap(),
+        NonZeroUsize::new(2).unwrap(),
     )
     .await;
+    print!("time: {:?}", start.elapsed());
 }
 
 enum WaitState {
@@ -144,6 +146,15 @@ where
                         match this.stream.as_mut().poll_next(cx) {
                             Poll::Ready(Some(item)) => {
                                 this.futs.push(item);
+                                println!(
+                                    "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
+                                    this.futs.len(),
+                                    this.buffer.len(),
+                                    this.stream.is_terminated()
+                                );
+                                if this.futs.len() + this.buffer.len() >= *this.capacity {
+                                    break WaitState::Futures(false);
+                                }
                             }
                             Poll::Ready(None) => {
                                 // stream and buffer is empty, we need to wait for new future finishing
