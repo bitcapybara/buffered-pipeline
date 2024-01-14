@@ -189,14 +189,14 @@ where
 mod tests {
     use std::{num::NonZeroUsize, time::Instant};
 
-    use futures::{FutureExt, StreamExt};
+    use futures::StreamExt;
     use tokio_util::sync::PollSender;
 
     use super::*;
 
     #[tokio::test]
     async fn test_bounded() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel::<usize>(5);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(5);
 
         tokio::spawn(async move {
             while let Some(res) = receiver.recv().await {
@@ -205,38 +205,16 @@ mod tests {
         });
         let start = Instant::now();
         BufferedPipeline::new(
-            futures::stream::iter([
-                async {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    5
-                }
-                .boxed(),
-                async {
-                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                    4
-                }
-                .boxed(),
-                async {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    3
-                }
-                .boxed(),
-                async {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    2
-                }
-                .boxed(),
-                async {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    1
-                }
-                .boxed(),
-            ])
-            .fuse(),
+            futures::stream::iter([fut(5), fut(4), fut(3), fut(2), fut(1)]).fuse(),
             PollSender::new(sender),
             NonZeroUsize::new(2).unwrap(),
         )
         .await;
         print!("time: {:?}", start.elapsed());
+    }
+
+    async fn fut(num: u64) -> u64 {
+        tokio::time::sleep(std::time::Duration::from_secs(num)).await;
+        num
     }
 }
