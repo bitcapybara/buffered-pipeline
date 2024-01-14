@@ -5,7 +5,7 @@ use pin_project::pin_project;
 
 enum WaitState {
     // true for pending
-    Futures(bool),
+    Futures,
     Stream,
     Sink,
 }
@@ -29,7 +29,7 @@ impl<St, Si, Fut, Fo> BufferedPipeline<St, Si, Fut, Fo> {
             futs: FuturesUnordered::new(),
             sink,
             buffer: std::collections::VecDeque::new(),
-            state: WaitState::Futures(false),
+            state: WaitState::Futures,
         }
     }
 }
@@ -48,9 +48,11 @@ where
     ) -> std::task::Poll<Self::Output> {
         let mut this = self.project();
 
-        'main: loop {
+        // priority: futuresUnordered > sink > stream
+
+        loop {
             match this.state {
-                WaitState::Futures(need_pending) => match this.futs.as_mut().poll_next(cx) {
+                WaitState::Futures => match this.futs.as_mut().poll_next(cx) {
                     Poll::Ready(Some(res)) => {
                         // get a finished future, continue
                         println!("new fut complete");
@@ -58,6 +60,10 @@ where
                     }
                     Poll::Ready(None) => {
                         println!("futs empty!, buffer: {}", this.buffer.len());
+                        if this.stream.is_terminated() {
+                            *this.state = WaitState::Sink;
+                            continue;
+                        }
                         if !this.buffer.is_empty() {
                             // we need to empty the buffer first
                             *this.state = WaitState::Sink;
@@ -66,10 +72,6 @@ where
                         }
                     }
                     Poll::Pending => {
-                        if *need_pending {
-                            *this.state = WaitState::Futures(false);
-                            return Poll::Pending;
-                        }
                         if !this.buffer.is_empty() {
                             *this.state = WaitState::Sink;
                             continue;
@@ -96,13 +98,14 @@ where
                             }
                             Poll::Ready(None) => {
                                 // stream and buffer is empty, we need to wait for new future finishing
-                                break WaitState::Futures(false);
+                                break WaitState::Futures;
                             }
                             Poll::Pending => {
                                 if this.futs.is_empty() {
                                     return Poll::Pending;
                                 }
-                                break WaitState::Futures(true);
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
                             }
                         }
                     };
@@ -117,8 +120,8 @@ where
                                 if this.futs.is_empty() {
                                     return Poll::Pending;
                                 }
-                                *this.state = WaitState::Futures(true);
-                                continue 'main;
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
                             }
                         }
                         let Some(res) = this.buffer.pop_front() else {
@@ -159,11 +162,11 @@ where
                             if this.futs.is_empty() {
                                 return Poll::Pending;
                             }
-                            *this.state = WaitState::Futures(true);
-                            continue 'main;
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
                         }
                     }
-                    *this.state = WaitState::Futures(false);
+                    *this.state = WaitState::Futures;
                 }
             }
         }
@@ -180,7 +183,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test() {
+    async fn test_unbounded() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<usize>(5);
 
         tokio::spawn(async move {

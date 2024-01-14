@@ -4,7 +4,7 @@ use futures::{stream::FuturesUnordered, Future, Stream};
 use pin_project::pin_project;
 
 enum WaitState {
-    Futures(bool),
+    Futures,
     Stream,
     Sink,
 }
@@ -30,7 +30,7 @@ impl<St, Si, Fut, Fo> BufferedPipeline<St, Si, Fut, Fo> {
             sink,
             buffer: std::collections::VecDeque::new(),
             capacity: capacity.get(),
-            state: WaitState::Futures(false),
+            state: WaitState::Futures,
         }
     }
 }
@@ -49,9 +49,9 @@ where
     ) -> std::task::Poll<Self::Output> {
         let mut this = self.project();
 
-        'main: loop {
+        loop {
             match this.state {
-                WaitState::Futures(need_pending) => match this.futs.as_mut().poll_next(cx) {
+                WaitState::Futures => match this.futs.as_mut().poll_next(cx) {
                     Poll::Ready(Some(res)) => {
                         // get a finished future, continue
                         println!("new fut complete");
@@ -59,6 +59,10 @@ where
                     }
                     Poll::Ready(None) => {
                         println!("futs empty!, buffer: {}", this.buffer.len());
+                        if this.stream.is_terminated() {
+                            *this.state = WaitState::Sink;
+                            continue;
+                        }
                         if !this.buffer.is_empty() {
                             // we need to empty the buffer first
                             *this.state = WaitState::Sink;
@@ -67,10 +71,6 @@ where
                         }
                     }
                     Poll::Pending => {
-                        if *need_pending {
-                            *this.state = WaitState::Futures(false);
-                            return Poll::Pending;
-                        }
                         if this.futs.len() + this.buffer.len() >= *this.capacity {
                             // the capacity is full, we can not receive more item from stream
                             if this.buffer.is_empty() {
@@ -105,18 +105,19 @@ where
                                     this.stream.is_terminated()
                                 );
                                 if this.futs.len() + this.buffer.len() >= *this.capacity {
-                                    break WaitState::Futures(false);
+                                    break WaitState::Futures;
                                 }
                             }
                             Poll::Ready(None) => {
                                 // stream and buffer is empty, we need to wait for new future finishing
-                                break WaitState::Futures(false);
+                                break WaitState::Futures;
                             }
                             Poll::Pending => {
                                 if this.futs.is_empty() {
                                     return Poll::Pending;
                                 }
-                                break WaitState::Futures(true);
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
                             }
                         }
                     };
@@ -131,8 +132,8 @@ where
                                 if this.futs.is_empty() {
                                     return Poll::Pending;
                                 }
-                                *this.state = WaitState::Futures(true);
-                                continue 'main;
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
                             }
                         }
                         let Some(res) = this.buffer.pop_front() else {
@@ -173,11 +174,11 @@ where
                             if this.futs.is_empty() {
                                 return Poll::Pending;
                             }
-                            *this.state = WaitState::Futures(true);
-                            continue 'main;
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
                         }
                     }
-                    *this.state = WaitState::Futures(false);
+                    *this.state = WaitState::Futures;
                 }
             }
         }
@@ -194,7 +195,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test() {
+    async fn test_bounded() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<usize>(5);
 
         tokio::spawn(async move {
