@@ -49,6 +49,8 @@ where
     ) -> std::task::Poll<Self::Output> {
         let mut this = self.project();
 
+        *this.state = WaitState::Futures;
+
         loop {
             match this.state {
                 WaitState::Futures => match this.futs.as_mut().poll_next(cx) {
@@ -105,6 +107,7 @@ where
                                 this.stream.is_terminated()
                             );
                             if this.futs.len() + this.buffer.len() >= *this.capacity {
+                                *this.state = WaitState::Futures;
                                 break;
                             }
                         }
@@ -178,6 +181,7 @@ where
                             return Poll::Pending;
                         }
                     }
+                    *this.state = WaitState::Futures;
                 }
             }
         }

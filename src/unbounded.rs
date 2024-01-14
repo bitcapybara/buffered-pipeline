@@ -49,6 +49,7 @@ where
         let mut this = self.project();
 
         // priority: futuresUnordered > sink > stream
+        *this.state = WaitState::Futures;
 
         loop {
             match this.state {

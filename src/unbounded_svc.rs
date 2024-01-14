@@ -52,6 +52,7 @@ where
         let mut this = self.project();
 
         // priority: futuresUnordered > sink > service > stream
+        *this.state = WaitState::Futures;
 
         loop {
             match this.state {
@@ -188,6 +189,7 @@ where
                             return Poll::Pending;
                         }
                     }
+                    *this.state = WaitState::Futures;
                 }
             }
         }
