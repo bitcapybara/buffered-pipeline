@@ -1,92 +1,43 @@
-use std::{num::NonZeroUsize, task::Poll, time::Instant};
+use std::task::Poll;
 
-use futures::{stream::FuturesUnordered, Future, FutureExt, Stream, StreamExt};
-use pin_project_lite::pin_project;
-use tokio_util::sync::PollSender;
-
-#[tokio::main]
-async fn main() {
-    let (sender, mut receiver) = tokio::sync::mpsc::channel::<usize>(5);
-
-    tokio::spawn(async move {
-        while let Some(res) = receiver.recv().await {
-            println!("{res:?}")
-        }
-    });
-    let start = Instant::now();
-    BufferedPipeline::new(
-        futures::stream::iter([
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                5
-            }
-            .boxed(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                4
-            }
-            .boxed(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                3
-            }
-            .boxed(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                2
-            }
-            .boxed(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                1
-            }
-            .boxed(),
-        ])
-        .fuse(),
-        PollSender::new(sender),
-        NonZeroUsize::new(2).unwrap(),
-    )
-    .await;
-    print!("time: {:?}", start.elapsed());
-}
+use futures::{stream::FuturesUnordered, Future, Stream};
+use pin_project::pin_project;
 
 enum WaitState {
+    // true for pending
     Futures(bool),
     Stream,
     Sink,
 }
 
-pin_project! {
-    pub struct BufferedPipeline<St, Si, Fut, Fo> {
-        #[pin]
-        stream: St,
-        #[pin]
-        futs: FuturesUnordered<Fut>,
-        #[pin]
-        sink: Si,
-        buffer: std::collections::VecDeque<Fo>,
-        capacity: usize,
-        state: WaitState
-    }
+#[pin_project]
+pub struct BufferedPipeline<St, Si, Fut, Fo> {
+    #[pin]
+    stream: St,
+    #[pin]
+    futs: FuturesUnordered<Fut>,
+    #[pin]
+    sink: Si,
+    buffer: std::collections::VecDeque<Fo>,
+    state: WaitState,
 }
 
 impl<St, Si, Fut, Fo> BufferedPipeline<St, Si, Fut, Fo> {
-    pub fn new(stream: St, sink: Si, capacity: std::num::NonZeroUsize) -> Self {
+    pub fn new(stream: St, sink: Si) -> Self {
         Self {
             stream,
             futs: FuturesUnordered::new(),
             sink,
             buffer: std::collections::VecDeque::new(),
-            capacity: capacity.get(),
             state: WaitState::Futures(false),
         }
     }
 }
 
-impl<St, Si, Fut, Sierr, Fo> Future for BufferedPipeline<St, Si, Fut, Fo>
+impl<St, Si, Fut, Se, Fo> Future for BufferedPipeline<St, Si, Fut, Fo>
 where
     Fut: Future<Output = Fo>,
-    Si: futures::Sink<Fut::Output, Error = Sierr>,
+    Si: futures::Sink<Fut::Output, Error = Se>,
     St: futures::stream::FusedStream<Item = Fut>,
 {
     type Output = ();
@@ -119,26 +70,16 @@ where
                             *this.state = WaitState::Futures(false);
                             return Poll::Pending;
                         }
-                        if this.futs.len() + this.buffer.len() >= *this.capacity {
-                            // the entire buffer is full, we can not receive more item from stream
-                            if this.buffer.is_empty() {
-                                // waiting for at least one future finishing
-                                return Poll::Pending;
-                            } else {
-                                *this.state = WaitState::Sink;
-                            }
+                        if !this.buffer.is_empty() {
+                            *this.state = WaitState::Sink;
                             continue;
                         }
-                        if this.buffer.is_empty() {
-                            // stream and buffer are all empty, we must wait for at least one future finishing
-                            if this.stream.is_terminated() {
-                                return Poll::Pending;
-                            }
-                            // now we can receive item from stream
-                            *this.state = WaitState::Stream;
-                            continue;
+                        // stream and buffer are all empty, we must wait for at least one future finishing
+                        if this.stream.is_terminated() {
+                            return Poll::Pending;
                         }
-                        *this.state = WaitState::Sink
+                        // now we can receive item from stream
+                        *this.state = WaitState::Stream;
                     }
                 },
                 WaitState::Stream => {
@@ -152,9 +93,6 @@ where
                                     this.buffer.len(),
                                     this.stream.is_terminated()
                                 );
-                                if this.futs.len() + this.buffer.len() >= *this.capacity {
-                                    break WaitState::Futures(false);
-                                }
                             }
                             Poll::Ready(None) => {
                                 // stream and buffer is empty, we need to wait for new future finishing
@@ -229,5 +167,60 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use futures::{FutureExt, StreamExt};
+    use tokio_util::sync::PollSender;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<usize>(5);
+
+        tokio::spawn(async move {
+            while let Some(res) = receiver.recv().await {
+                println!("{res:?}")
+            }
+        });
+        let start = Instant::now();
+        BufferedPipeline::new(
+            futures::stream::iter([
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    5
+                }
+                .boxed(),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    4
+                }
+                .boxed(),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    3
+                }
+                .boxed(),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    2
+                }
+                .boxed(),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    1
+                }
+                .boxed(),
+            ])
+            .fuse(),
+            PollSender::new(sender),
+        )
+        .await;
+        print!("time: {:?}", start.elapsed());
     }
 }
