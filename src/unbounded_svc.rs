@@ -11,36 +11,39 @@ enum WaitState {
 }
 
 #[pin_project]
-pub struct UnboundedPipeline<St, Si, Fut, Fo> {
+pub struct UnboundedServicePipeline<St, Si, Svc, Fut, Fo> {
     #[pin]
     stream: St,
     #[pin]
     futs: FuturesUnordered<Fut>,
     #[pin]
     sink: Si,
+    service: Svc,
     buffer: std::collections::VecDeque<Fo>,
     state: WaitState,
 }
 
-impl<St, Si, Fut, Fo> UnboundedPipeline<St, Si, Fut, Fo> {
-    pub fn new(stream: St, sink: Si) -> Self {
+impl<St, Si, Svc, Fut, Fo> UnboundedServicePipeline<St, Si, Svc, Fut, Fo> {
+    pub fn new(stream: St, service: Svc, sink: Si) -> Self {
         Self {
             stream,
             futs: FuturesUnordered::new(),
             sink,
+            service,
             buffer: std::collections::VecDeque::new(),
             state: WaitState::Futures,
         }
     }
 }
 
-impl<St, Si, Fut, Se, Fo> Future for UnboundedPipeline<St, Si, Fut, Fo>
+impl<St, Si, Svc, Fut, Fo> Future for UnboundedServicePipeline<St, Si, Svc, Fut, Fo>
 where
+    Svc: tower::Service<St::Item, Future = Fut>,
     Fut: Future<Output = Fo>,
-    Si: futures::Sink<Fut::Output, Error = Se>,
-    St: futures::stream::FusedStream<Item = Fut>,
+    Si: futures::Sink<Fo>,
+    St: futures::stream::FusedStream,
 {
-    type Output = ();
+    type Output = Result<(), Svc::Error>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -48,10 +51,11 @@ where
     ) -> std::task::Poll<Self::Output> {
         let mut this = self.project();
 
-        // priority: futuresUnordered > sink > stream
+        // priority: futuresUnordered > sink > service > stream
 
         loop {
             match this.state {
+                // poll futures as much as possible
                 WaitState::Futures => match this.futs.as_mut().poll_next(cx) {
                     Poll::Ready(Some(res)) => {
                         // get a finished future, continue
@@ -84,22 +88,41 @@ where
                         *this.state = WaitState::Stream;
                     }
                 },
+                // poll item from stream as much as possible
                 WaitState::Stream => loop {
-                    match this.stream.as_mut().poll_next(cx) {
-                        Poll::Ready(Some(item)) => {
-                            this.futs.push(item);
-                            println!(
-                                "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
-                                this.futs.len(),
-                                this.buffer.len(),
-                                this.stream.is_terminated()
-                            );
+                    // check if service is ready
+                    match this.service.poll_ready(cx) {
+                        // service is ready, then poll a new item from stream
+                        // TODO use StreamExt::ready_chunks
+                        Poll::Ready(Ok(_)) => match this.stream.as_mut().poll_next(cx) {
+                            Poll::Ready(Some(req)) => {
+                                let fut = this.service.call(req);
+                                this.futs.push(fut);
+                                println!(
+                                    "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
+                                    this.futs.len(),
+                                    this.buffer.len(),
+                                    this.stream.is_terminated()
+                                );
+                            }
+                            Poll::Ready(None) => {
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
+                            }
+                            Poll::Pending => {
+                                if this.futs.is_empty() {
+                                    return Poll::Pending;
+                                }
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
+                            }
+                        },
+                        // service is no more usable
+                        Poll::Ready(Err(e)) => {
+                            // TODO emit
+                            return Poll::Ready(Err(e));
                         }
-                        Poll::Ready(None) => {
-                            // stream and buffer is empty, we need to wait for new future finishing
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
-                        }
+                        // service is not ready
                         Poll::Pending => {
                             if this.futs.is_empty() {
                                 return Poll::Pending;
@@ -151,7 +174,7 @@ where
                             {
                                 println!("close!");
                                 match this.sink.as_mut().poll_close(cx) {
-                                    Poll::Ready(_) => return Poll::Ready(()),
+                                    Poll::Ready(_) => return Poll::Ready(Ok(())),
                                     Poll::Pending => return Poll::Pending,
                                 }
                             }
@@ -165,42 +188,8 @@ where
                             return Poll::Pending;
                         }
                     }
-                    *this.state = WaitState::Futures;
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Instant;
-
-    use futures::StreamExt;
-    use tokio_util::sync::PollSender;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_unbounded() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(5);
-
-        tokio::spawn(async move {
-            while let Some(res) = receiver.recv().await {
-                println!("{res:?}")
-            }
-        });
-        let start = Instant::now();
-        UnboundedPipeline::new(
-            futures::stream::iter([fut(5), fut(4), fut(3), fut(2), fut(1)]).fuse(),
-            PollSender::new(sender),
-        )
-        .await;
-        print!("time: {:?}", start.elapsed());
-    }
-
-    async fn fut(num: u64) -> u64 {
-        tokio::time::sleep(std::time::Duration::from_secs(num)).await;
-        num
     }
 }

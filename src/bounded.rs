@@ -10,7 +10,7 @@ enum WaitState {
 }
 
 #[pin_project]
-pub struct BufferedPipeline<St, Si, Fut, Fo> {
+pub struct BoundedPipeline<St, Si, Fut, Fo> {
     #[pin]
     stream: St,
     #[pin]
@@ -22,7 +22,7 @@ pub struct BufferedPipeline<St, Si, Fut, Fo> {
     state: WaitState,
 }
 
-impl<St, Si, Fut, Fo> BufferedPipeline<St, Si, Fut, Fo> {
+impl<St, Si, Fut, Fo> BoundedPipeline<St, Si, Fut, Fo> {
     pub fn new(stream: St, sink: Si, capacity: std::num::NonZeroUsize) -> Self {
         Self {
             stream,
@@ -35,7 +35,7 @@ impl<St, Si, Fut, Fo> BufferedPipeline<St, Si, Fut, Fo> {
     }
 }
 
-impl<St, Si, Fut, Se, Fo> Future for BufferedPipeline<St, Si, Fut, Fo>
+impl<St, Si, Fut, Se, Fo> Future for BoundedPipeline<St, Si, Fut, Fo>
 where
     Fut: Future<Output = Fo>,
     Si: futures::Sink<Fut::Output, Error = Se>,
@@ -93,37 +93,37 @@ where
                         *this.state = WaitState::Stream;
                     }
                 },
-                WaitState::Stream => {
-                    *this.state = loop {
-                        match this.stream.as_mut().poll_next(cx) {
-                            Poll::Ready(Some(item)) => {
-                                this.futs.push(item);
-                                println!(
-                                    "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
-                                    this.futs.len(),
-                                    this.buffer.len(),
-                                    this.stream.is_terminated()
-                                );
-                                if this.futs.len() + this.buffer.len() >= *this.capacity {
-                                    break WaitState::Futures;
-                                }
-                            }
-                            Poll::Ready(None) => {
-                                // stream and buffer is empty, we need to wait for new future finishing
-                                break WaitState::Futures;
-                            }
-                            Poll::Pending => {
-                                if this.futs.is_empty() {
-                                    return Poll::Pending;
-                                }
-                                cx.waker().wake_by_ref();
-                                return Poll::Pending;
+                // poll item from stream as much as possible
+                WaitState::Stream => loop {
+                    match this.stream.as_mut().poll_next(cx) {
+                        Poll::Ready(Some(item)) => {
+                            this.futs.push(item);
+                            println!(
+                                "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
+                                this.futs.len(),
+                                this.buffer.len(),
+                                this.stream.is_terminated()
+                            );
+                            if this.futs.len() + this.buffer.len() >= *this.capacity {
+                                break;
                             }
                         }
-                    };
-                }
+                        Poll::Ready(None) => {
+                            // stream and buffer is empty, we need to wait for new future finishing
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        Poll::Pending => {
+                            if this.futs.is_empty() {
+                                return Poll::Pending;
+                            }
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                    }
+                },
+                // sink buffer items as much as possible
                 WaitState::Sink => {
-                    // sink buffer items
                     loop {
                         match this.sink.as_mut().poll_ready(cx) {
                             Poll::Ready(_) => {}
@@ -178,7 +178,6 @@ where
                             return Poll::Pending;
                         }
                     }
-                    *this.state = WaitState::Futures;
                 }
             }
         }
@@ -204,7 +203,7 @@ mod tests {
             }
         });
         let start = Instant::now();
-        BufferedPipeline::new(
+        BoundedPipeline::new(
             futures::stream::iter([fut(5), fut(4), fut(3), fut(2), fut(1)]).fuse(),
             PollSender::new(sender),
             NonZeroUsize::new(2).unwrap(),
