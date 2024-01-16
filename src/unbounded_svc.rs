@@ -90,49 +90,62 @@ where
                     }
                 },
                 // poll item from stream as much as possible
-                WaitState::Stream => loop {
-                    // check if service is ready
-                    match this.service.poll_ready(cx) {
-                        // service is ready, then poll a new item from stream
-                        // TODO use StreamExt::ready_chunks
-                        Poll::Ready(Ok(_)) => match this.stream.as_mut().poll_next(cx) {
-                            Poll::Ready(Some(req)) => {
-                                let fut = this.service.call(req);
-                                this.futs.push(fut);
-                                println!(
+                WaitState::Stream => {
+                    let mut added_new = false;
+                    loop {
+                        // check if service is ready
+                        match this.service.poll_ready(cx) {
+                            // service is ready, then poll a new item from stream
+                            // TODO use StreamExt::ready_chunks
+                            Poll::Ready(Ok(_)) => match this.stream.as_mut().poll_next(cx) {
+                                Poll::Ready(Some(req)) => {
+                                    this.futs.push(this.service.call(req));
+                                    added_new = true;
+                                    println!(
                                     "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
                                     this.futs.len(),
                                     this.buffer.len(),
                                     this.stream.is_terminated()
                                 );
+                                }
+                                Poll::Ready(None) => {
+                                    if added_new {
+                                        break;
+                                    }
+                                    cx.waker().wake_by_ref();
+                                    return Poll::Pending;
+                                }
+                                Poll::Pending => {
+                                    if added_new {
+                                        break;
+                                    }
+                                    if this.futs.is_empty() {
+                                        return Poll::Pending;
+                                    }
+                                    cx.waker().wake_by_ref();
+                                    return Poll::Pending;
+                                }
+                            },
+                            // service is no more usable
+                            Poll::Ready(Err(e)) => {
+                                // TODO emit
+                                return Poll::Ready(Err(e));
                             }
-                            Poll::Ready(None) => {
-                                cx.waker().wake_by_ref();
-                                return Poll::Pending;
-                            }
+                            // service is not ready
                             Poll::Pending => {
+                                if added_new {
+                                    break;
+                                }
                                 if this.futs.is_empty() {
                                     return Poll::Pending;
                                 }
                                 cx.waker().wake_by_ref();
                                 return Poll::Pending;
                             }
-                        },
-                        // service is no more usable
-                        Poll::Ready(Err(e)) => {
-                            // TODO emit
-                            return Poll::Ready(Err(e));
-                        }
-                        // service is not ready
-                        Poll::Pending => {
-                            if this.futs.is_empty() {
-                                return Poll::Pending;
-                            }
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
                         }
                     }
-                },
+                    *this.state = WaitState::Futures;
+                }
                 // sink buffer items as much as possible
                 WaitState::Sink => {
                     loop {

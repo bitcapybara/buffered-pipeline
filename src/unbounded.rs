@@ -85,31 +85,42 @@ where
                         *this.state = WaitState::Stream;
                     }
                 },
-                WaitState::Stream => loop {
-                    match this.stream.as_mut().poll_next(cx) {
-                        Poll::Ready(Some(item)) => {
-                            this.futs.push(item);
-                            println!(
-                                "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
-                                this.futs.len(),
-                                this.buffer.len(),
-                                this.stream.is_terminated()
-                            );
-                        }
-                        Poll::Ready(None) => {
-                            // stream and buffer is empty, we need to wait for new future finishing
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
-                        }
-                        Poll::Pending => {
-                            if this.futs.is_empty() {
+                WaitState::Stream => {
+                    let mut added_new = false;
+                    loop {
+                        match this.stream.as_mut().poll_next(cx) {
+                            Poll::Ready(Some(item)) => {
+                                this.futs.push(item);
+                                added_new = true;
+                                println!(
+                                    "new item from stream: futs: {}, buffer: {}, stream terminate: {}",
+                                    this.futs.len(),
+                                    this.buffer.len(),
+                                    this.stream.is_terminated()
+                                );
+                            }
+                            Poll::Ready(None) => {
+                                if added_new {
+                                    break;
+                                }
+                                // stream and buffer is empty, we need to wait for new future finishing
+                                cx.waker().wake_by_ref();
                                 return Poll::Pending;
                             }
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
+                            Poll::Pending => {
+                                if added_new {
+                                    break;
+                                }
+                                if this.futs.is_empty() {
+                                    return Poll::Pending;
+                                }
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
+                            }
                         }
                     }
-                },
+                    *this.state = WaitState::Futures;
+                }
                 // sink buffer items as much as possible
                 WaitState::Sink => {
                     loop {
